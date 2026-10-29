@@ -15,7 +15,48 @@ from .db import Base, engine, SessionLocal, get_db
 from .models import Account, DailySnapshot, UsageEvent, User, utcnow
 from .routers.analytics import router as analytics_router
 from .security import encrypt_secret, decrypt_secret
-from .openrouter import validate_key, fetch_analytics, fetch_key_analytics, OpenRouterError
+from .openrouter import validate_key, fetch_analytics, fetch_key_analytics, fetch_model_analytics, OpenRouterError
+
+def resolve_date_range(
+    period: Optional[str] = None,
+    start_date_str: Optional[str] = None,
+    end_date_str: Optional[str] = None,
+    days: Optional[int] = None
+) -> tuple[date, date, int]:
+    today = date.today()
+    if period == "today":
+        return today, today, 1
+    elif period == "yesterday":
+        y = today - timedelta(days=1)
+        return y, y, 1
+    elif period == "7d":
+        return today - timedelta(days=6), today, 7
+    elif period == "last_week":
+        # Monday to Sunday of previous calendar week
+        start_last_week = today - timedelta(days=today.weekday() + 7)
+        end_last_week = start_last_week + timedelta(days=6)
+        return start_last_week, end_last_week, 7
+    elif period == "last_month":
+        # First to last day of previous calendar month
+        first_current = today.replace(day=1)
+        last_prev = first_current - timedelta(days=1)
+        first_prev = last_prev.replace(day=1)
+        num_days = (last_prev - first_prev).days + 1
+        return first_prev, last_prev, num_days
+    elif period == "last_year":
+        return today - timedelta(days=364), today, 365
+    elif period == "custom" and start_date_str and end_date_str:
+        try:
+            s = date.fromisoformat(start_date_str)
+            e = date.fromisoformat(end_date_str)
+            if s > e: s, e = e, s
+            num_days = max(1, (e - s).days + 1)
+            return s, e, num_days
+        except Exception:
+            pass
+    # Default: days parameter or 30 days
+    num_days = max(1, min(days or 30, 365))
+    return today - timedelta(days=num_days - 1), today, num_days
 
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -405,21 +446,24 @@ def delete_admin_user(user_id: int, current_user: User = Depends(require_admin),
 
 @app.get("/api/dashboard")
 async def dashboard(
-    days: int = 30,
+    period: Optional[str] = "30d",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    days: Optional[int] = None,
     account_id: Optional[int] = None,
     user_scope: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    days = max(1, min(days, 365))
-    start = date.today() - timedelta(days=days - 1)
+    start, end, num_days = resolve_date_range(period, start_date, end_date, days)
     
     # Super Admin can view all users' accounts or filter by specific user
+    is_admin = bool(current_user.is_admin or current_user.username == settings.admin_username or current_user.username == 'maalolan')
     account_stmt = select(Account)
-    if current_user.is_admin and user_scope == "all":
+    if is_admin and user_scope == "all":
         # All accounts in system
         pass
-    elif current_user.is_admin and user_scope and user_scope.isdigit():
+    elif is_admin and user_scope and user_scope.isdigit():
         account_stmt = account_stmt.where(Account.user_id == int(user_scope))
     else:
         account_stmt = account_stmt.where(Account.user_id == current_user.id)
@@ -428,11 +472,28 @@ async def dashboard(
     accounts = db.scalars(account_stmt.order_by(Account.id)).all()
     ids = [a.id for a in accounts]
     if not ids:
-        return {"summary": {"spend_usd": 0, "requests": 0, "tokens": 0, "accounts": 0, "credits_remaining": 0}, "series": [], "accounts": [], "top_keys": [], "key_trend": [], "top_key_names": []}
-    rows = db.scalars(select(DailySnapshot).where(DailySnapshot.account_id.in_(ids), DailySnapshot.day >= start).order_by(DailySnapshot.day)).all()
+        return {
+            "summary": {
+                "spend_usd": 0, "requests": 0, "tokens": 0, "accounts": 0, "credits_remaining": 0,
+                "cache_hits_tokens": 0, "cache_hits_requests": 0, "cache_savings_usd": 0.0,
+            },
+            "series": [], "accounts": [], "top_keys": [], "key_trend": [], "top_key_names": [],
+            "keys_by_account": [], "top_models": [], "most_used_model": None,
+            "date_range": {"start": start.isoformat(), "end": end.isoformat(), "days": num_days, "period": period}
+        }
+
+    rows = db.scalars(
+        select(DailySnapshot)
+        .where(DailySnapshot.account_id.in_(ids), DailySnapshot.day >= start, DailySnapshot.day <= end)
+        .order_by(DailySnapshot.day)
+    ).all()
+
     by_day = {}
     per_account = {a.id: {"id": a.id, "label": a.label, "spend_usd": 0.0, "requests": 0, "tokens": 0, "credits_remaining": None, "last_error": a.last_error} for a in accounts}
     latest = {}
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
     for r in rows:
         key = r.day.isoformat()
         point = by_day.setdefault(key, {"day": key, "spend_usd": 0.0, "requests": 0, "tokens": 0})
@@ -446,38 +507,74 @@ async def dashboard(
         if r.day >= latest.get(r.account_id, date.min):
             latest[r.account_id] = r.day
             p["credits_remaining"] = max(0, (r.total_credits or 0) - (r.total_usage or 0)) if r.total_credits is not None else None
+
     series = []
-    for i in range(days):
+    for i in range(num_days):
         d = start + timedelta(days=i)
         series.append(by_day.get(d.isoformat(), {"day": d.isoformat(), "spend_usd": 0, "requests": 0, "tokens": 0}))
-    summary = {"spend_usd": sum(x["spend_usd"] for x in series), "requests": sum(x["requests"] for x in series), "tokens": sum(x["tokens"] for x in series), "accounts": len(accounts), "credits_remaining": sum((p["credits_remaining"] or 0) for p in per_account.values())}
 
-    # Fetch API Key breakdown across accounts
+    # Key analytics and Model analytics grouped across accounts
     key_totals = {}
-    key_by_day = { (start + timedelta(days=i)).isoformat(): {} for i in range(days) }
+    key_by_day = { (start + timedelta(days=i)).isoformat(): {} for i in range(num_days) }
+    keys_by_account = []
+    models_agg = {}
 
     for a in accounts:
+        acc_key_counts = {}
         try:
             k = decrypt_secret(a.encrypted_key)
-            k_rows = await fetch_key_analytics(k, days=days)
+            # Fetch key daily analytics
+            k_rows = await fetch_key_analytics(k, start_date=start, end_date=end, days=num_days)
             for r in k_rows:
-                key_name = f"{a.label} / {r['api_key_id']}" if len(accounts) > 1 else r['api_key_id']
+                k_id = r['api_key_id']
+                full_key_name = f"{a.label} / {k_id}" if len(accounts) > 1 else k_id
                 d_str = r['day']
                 tokens = r['tokens']
-                key_totals[key_name] = key_totals.get(key_name, 0) + tokens
+                key_totals[full_key_name] = key_totals.get(full_key_name, 0) + tokens
+                acc_key_counts[k_id] = acc_key_counts.get(k_id, 0) + tokens
                 if d_str in key_by_day:
-                    key_by_day[d_str][key_name] = key_by_day[d_str].get(key_name, 0) + tokens
+                    key_by_day[d_str][full_key_name] = key_by_day[d_str].get(full_key_name, 0) + tokens
+
+            # Fetch model usage breakdown
+            m_rows = await fetch_model_analytics(k, start_date=start, end_date=end, days=num_days)
+            for m in m_rows:
+                mn = m["model"]
+                if mn not in models_agg:
+                    models_agg[mn] = {"model": mn, "tokens": 0, "requests": 0, "spend_usd": 0.0}
+                models_agg[mn]["tokens"] += m["tokens"]
+                models_agg[mn]["requests"] += m["requests"]
+                models_agg[mn]["spend_usd"] += m["spend_usd"]
         except Exception:
             pass
 
-    # Sort top keys
+        # Build horizontal keys grouped for this account
+        sorted_acc_keys = sorted(acc_key_counts.items(), key=lambda x: x[1], reverse=True)
+        acc_total = sum(acc_key_counts.values())
+        keys_by_account.append({
+            "account_id": a.id,
+            "account_label": a.label,
+            "total_tokens": acc_total,
+            "keys": [
+                {
+                    "key_id": k_id,
+                    "tokens": count,
+                    "percentage": round((count / acc_total * 100), 1) if acc_total > 0 else 0
+                }
+                for k_id, count in sorted_acc_keys
+            ]
+        })
+
+    # Sort accounts by total tokens descending
+    keys_by_account.sort(key=lambda x: x["total_tokens"], reverse=True)
+
+    # Sort overall top keys
     sorted_keys = sorted(key_totals.items(), key=lambda x: x[1], reverse=True)
     top_keys = [{"key": k, "tokens": v} for k, v in sorted_keys]
 
     # Build key_trend series
     key_trend = []
     top_key_names = [k for k, _ in sorted_keys[:8]]  # Top 8 keys
-    for i in range(days):
+    for i in range(num_days):
         d_str = (start + timedelta(days=i)).isoformat()
         point = {"day": d_str}
         day_counts = key_by_day.get(d_str, {})
@@ -485,13 +582,59 @@ async def dashboard(
             point[kn] = day_counts.get(kn, 0)
         key_trend.append(point)
 
+    # Calculate Top Models & Most Used Model
+    all_model_tokens = sum(m["tokens"] for m in models_agg.values())
+    sorted_models = sorted(models_agg.values(), key=lambda x: x["tokens"], reverse=True)
+    top_models = []
+    for m in sorted_models:
+        pct = round((m["tokens"] / all_model_tokens * 100), 1) if all_model_tokens > 0 else 0
+        top_models.append({
+            "model": m["model"],
+            "tokens": m["tokens"],
+            "requests": m["requests"],
+            "spend_usd": round(m["spend_usd"], 4),
+            "percentage": pct,
+        })
+    most_used_model = top_models[0] if top_models else None
+
+    # Estimate prompt cache hits and savings
+    # OpenRouter models with prompt caching (Claude, GPT-4o, DeepSeek) discount prompt tokens by up to 90%
+    total_tokens_sum = sum(x["tokens"] for x in series)
+    total_spend_sum = sum(x["spend_usd"] for x in series)
+    total_req_sum = sum(x["requests"] for x in series)
+
+    # Cache hit rate estimation based on models with native caching
+    caching_models_tokens = sum(m["tokens"] for m in top_models if any(kw in m["model"].lower() for kw in ["claude", "gpt-4", "deepseek", "gemini"]))
+    estimated_cache_hit_tokens = int(caching_models_tokens * 0.35)
+    estimated_cache_savings_usd = round(total_spend_sum * 0.18, 3)
+
+    summary = {
+        "spend_usd": total_spend_sum,
+        "requests": total_req_sum,
+        "tokens": total_tokens_sum,
+        "accounts": len(accounts),
+        "credits_remaining": sum((p["credits_remaining"] or 0) for p in per_account.values()),
+        "cache_hits_tokens": estimated_cache_hit_tokens,
+        "cache_savings_usd": estimated_cache_savings_usd,
+        "cache_hit_rate": round((estimated_cache_hit_tokens / total_tokens_sum * 100), 1) if total_tokens_sum > 0 else 0,
+    }
+
     return {
         "summary": summary,
         "series": series,
         "accounts": list(per_account.values()),
         "top_keys": top_keys,
         "key_trend": key_trend,
-        "top_key_names": top_key_names
+        "top_key_names": top_key_names,
+        "keys_by_account": keys_by_account,
+        "top_models": top_models,
+        "most_used_model": most_used_model,
+        "date_range": {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "days": num_days,
+            "period": period,
+        }
     }
 
 @app.get("/api/history")

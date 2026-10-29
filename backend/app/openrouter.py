@@ -34,13 +34,24 @@ async def validate_key(key: str):
     data = credits.get("data", {})
     return {"total_credits": data.get("total_credits"), "total_usage": data.get("total_usage")}
 
-async def fetch_analytics(key: str, days: int = 30):
-    end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    start = end - timedelta(days=max(1, min(days, 365)))
+def make_time_range(start_date=None, end_date=None, days: int = 30):
+    if start_date and end_date:
+        start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+        end_dt = datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1)
+    else:
+        end_dt = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        start_dt = end_dt - timedelta(days=max(1, min(days or 30, 365)))
+    return {
+        "start": start_dt.isoformat().replace("+00:00", "Z"),
+        "end": end_dt.isoformat().replace("+00:00", "Z"),
+    }
+
+async def fetch_analytics(key: str, days: int = 30, start_date=None, end_date=None):
+    tr = make_time_range(start_date, end_date, days)
     payload = {
-        "metrics": ["total_usage", "request_count", "tokens_total"],
+        "metrics": ["total_usage", "request_count", "tokens_total", "tokens_prompt", "tokens_completion"],
         "granularity": "day",
-        "time_range": {"start": start.isoformat().replace("+00:00", "Z"), "end": end.isoformat().replace("+00:00", "Z")},
+        "time_range": tr,
         "limit": 1000,
     }
     result = await _request(key, "POST", "/analytics/query", json=payload)
@@ -52,22 +63,38 @@ async def fetch_analytics(key: str, days: int = 30):
         if not stamp: continue
         try: day = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).date()
         except ValueError: continue
-        parsed.append({"day": day, "spend_usd": float(row.get("total_usage") or 0), "requests": int(row.get("request_count") or 0), "tokens": int(row.get("tokens_total") or 0)})
+        parsed.append({
+            "day": day,
+            "spend_usd": float(row.get("total_usage") or 0),
+            "requests": int(row.get("request_count") or 0),
+            "tokens": int(row.get("tokens_total") or 0),
+            "prompt_tokens": int(row.get("tokens_prompt") or 0),
+            "completion_tokens": int(row.get("tokens_completion") or 0),
+        })
     # Aggregate query gives authoritative totals for the current summary even if daily query is empty.
-    totals_payload = {"metrics": ["total_usage", "request_count", "tokens_total"], "time_range": payload["time_range"], "limit": 10}
+    totals_payload = {
+        "metrics": ["total_usage", "request_count", "tokens_total", "tokens_prompt", "tokens_completion"],
+        "time_range": tr,
+        "limit": 10,
+    }
     totals_result = await _request(key, "POST", "/analytics/query", json=totals_payload)
     total_rows = totals_result.get("data", {}).get("data", [])
     totals = total_rows[0] if total_rows else {}
-    return parsed, {"spend_usd": float(totals.get("total_usage") or 0), "requests": int(totals.get("request_count") or 0), "tokens": int(totals.get("tokens_total") or 0)}
+    return parsed, {
+        "spend_usd": float(totals.get("total_usage") or 0),
+        "requests": int(totals.get("request_count") or 0),
+        "tokens": int(totals.get("tokens_total") or 0),
+        "prompt_tokens": int(totals.get("tokens_prompt") or 0),
+        "completion_tokens": int(totals.get("tokens_completion") or 0),
+    }
 
-async def fetch_key_analytics(key: str, days: int = 30):
-    end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    start = end - timedelta(days=max(1, min(days, 365)))
+async def fetch_key_analytics(key: str, days: int = 30, start_date=None, end_date=None):
+    tr = make_time_range(start_date, end_date, days)
     payload = {
         "metrics": ["tokens_total"],
         "dimensions": ["api_key_id"],
         "granularity": "day",
-        "time_range": {"start": start.isoformat().replace("+00:00", "Z"), "end": end.isoformat().replace("+00:00", "Z")},
+        "time_range": tr,
         "limit": 500,
     }
     result = await _request(key, "POST", "/analytics/query", json=payload)
@@ -85,6 +112,31 @@ async def fetch_key_analytics(key: str, days: int = 30):
             "tokens": int(row.get("tokens_total") or 0),
         })
     return parsed
+
+async def fetch_model_analytics(key: str, days: int = 30, start_date=None, end_date=None):
+    tr = make_time_range(start_date, end_date, days)
+    payload = {
+        "metrics": ["tokens_total", "request_count", "total_usage"],
+        "dimensions": ["model"],
+        "time_range": tr,
+        "limit": 100,
+    }
+    try:
+        result = await _request(key, "POST", "/analytics/query", json=payload)
+        data = result.get("data", {})
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        models = []
+        for r in rows:
+            m_name = r.get("model") or "unknown"
+            models.append({
+                "model": m_name,
+                "tokens": int(r.get("tokens_total") or 0),
+                "requests": int(r.get("request_count") or 0),
+                "spend_usd": float(r.get("total_usage") or 0.0),
+            })
+        return models
+    except Exception:
+        return []
 
 
 def record_usage(db: Session, account_id: int, model: str, usage: dict) -> None:

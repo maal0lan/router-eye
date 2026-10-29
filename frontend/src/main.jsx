@@ -21,6 +21,10 @@ import {
   UserPlus,
   UserCheck,
   ShieldAlert,
+  Database,
+  Sparkles,
+  Calendar,
+  Award,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -274,7 +278,9 @@ function App() {
 
   const [accounts, setAccounts] = useState([]);
   const [dashboard, setDashboard] = useState(null);
-  const [days, setDays] = useState(30);
+  const [period, setPeriod] = useState('30d');
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
   const [filter, setFilter] = useState('all');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -364,7 +370,11 @@ function App() {
     try {
       const accountPath = '/api/accounts';
       const scopeParam = currentUser.is_admin && userScope ? `&user_scope=${userScope}` : '';
-      const dashboardPath = `/api/dashboard?days=${days}${
+      let dateParams = `period=${period}`;
+      if (period === 'custom' && customStart && customEnd) {
+        dateParams += `&start_date=${encodeURIComponent(customStart)}&end_date=${encodeURIComponent(customEnd)}`;
+      }
+      const dashboardPath = `/api/dashboard?${dateParams}${
         filter !== 'all' ? `&account_id=${encodeURIComponent(filter)}` : ''
       }${scopeParam}`;
       const [accountData, dashboardData] = await Promise.all([
@@ -404,13 +414,16 @@ function App() {
 
   useEffect(() => {
     if (authenticated) {
+      if (period === 'custom' && (!customStart || !customEnd)) {
+        return;
+      }
       load();
       if (currentUser.is_admin && adminTab === 'users') {
         loadAdminUsers();
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, days, filter, userScope, adminTab]);
+  }, [authenticated, period, customStart, customEnd, filter, userScope, adminTab]);
 
   async function addAccount(event) {
     event.preventDefault();
@@ -482,6 +495,10 @@ function App() {
   const topKeys = dashboard?.top_keys || [];
   const keyTrend = dashboard?.key_trend || [];
   const topKeyNames = dashboard?.top_key_names || [];
+  const keysByAccount = dashboard?.keys_by_account || [];
+  const topModels = dashboard?.top_models || [];
+  const mostUsedModel = dashboard?.most_used_model;
+  const dateRange = dashboard?.date_range || {};
 
   const exportCsv = () => {
     const rows = [
@@ -720,26 +737,46 @@ function App() {
                     ))}
                   </select>
                 </label>
-            <div className="segmented">
-              {[7, 30, 90].map((numberOfDays) => (
-                <button
-                  key={numberOfDays}
-                  className={days === numberOfDays ? 'selected' : ''}
-                  onClick={() => setDays(numberOfDays)}
-                >
-                  {numberOfDays}D
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
+                <label className="filter-label">
+                  Period
+                  <select value={period} onChange={(e) => setPeriod(e.target.value)}>
+                    <option value="today">Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="7d">Last 7 Days</option>
+                    <option value="last_week">Last Week</option>
+                    <option value="30d">Last 30 Days</option>
+                    <option value="last_month">Last Month</option>
+                    <option value="last_year">Last Year</option>
+                    <option value="custom">Custom Range</option>
+                  </select>
+                </label>
+                {period === 'custom' && (
+                  <div className="date-picker-inline">
+                    <input
+                      type="date"
+                      value={customStart}
+                      onChange={(e) => setCustomStart(e.target.value)}
+                      title="Start Date"
+                    />
+                    <span style={{ color: '#858ba3', fontSize: '12px' }}>to</span>
+                    <input
+                      type="date"
+                      value={customEnd}
+                      onChange={(e) => setCustomEnd(e.target.value)}
+                      title="End Date"
+                    />
+                  </div>
+                )}
+              </div>
+            </section>
 
-        <section className="metrics-grid">
-          <Metric icon={CircleDollarSign} label="TOTAL SPEND" value={fmtMoney(summary.spend_usd)} detail={`${days}-day window`} tint="violet" />
-          <Metric icon={Zap} label="TOTAL REQUESTS" value={fmtNum(summary.requests)} detail="Across connected accounts" tint="blue" />
-          <Metric icon={Cpu} label="TOKENS PROCESSED" value={fmtNum(summary.tokens)} detail="Prompt + completion" tint="cyan" />
-          <Metric icon={Users} label="CREDIT BALANCE" value={fmtMoney(summary.credits_remaining)} detail={`${summary.accounts || 0} connected accounts`} tint="orange" />
-        </section>
+            <section className="metrics-grid">
+              <Metric icon={CircleDollarSign} label="TOTAL SPEND" value={fmtMoney(summary.spend_usd)} detail={dateRange?.label || `${period} window`} tint="violet" />
+              <Metric icon={Zap} label="TOTAL REQUESTS" value={fmtNum(summary.requests)} detail="Across connected accounts" tint="blue" />
+              <Metric icon={Cpu} label="TOKENS PROCESSED" value={fmtNum(summary.tokens)} detail="Prompt + completion" tint="cyan" />
+              <Metric icon={Database} label="CACHE HITS" value={fmtNum(summary.cache_hits_tokens || 0)} detail={`~${summary.cache_hit_rate || 0}% hit rate`} tint="emerald" />
+              <Metric icon={Users} label="CREDIT BALANCE" value={fmtMoney(summary.credits_remaining)} detail={`${summary.accounts || 0} connected accounts`} tint="orange" />
+            </section>
 
         {/* Top API Keys Leaderboard */}
         {topKeys.length > 0 && (
@@ -797,7 +834,7 @@ function App() {
 
             <div className="chart-total">
               <strong>{graphMode === 'tokens' ? fmtFullNum(summary.tokens) : fmtMoney(summary.spend_usd)}</strong>
-              <span className="chart-period">{graphMode === 'tokens' ? 'Tokens in last ' + days + ' days' : 'Last ' + days + ' days'}</span>
+              <span className="chart-period">{graphMode === 'tokens' ? `Tokens in ${dateRange?.label || period}` : (dateRange?.label || period)}</span>
             </div>
 
             <div className="chart-area">
@@ -1012,6 +1049,116 @@ function App() {
             </div>
           </div>
         </section>
+
+        {/* Horizontal API Keys by Account & Top Models Spotlight */}
+        {keysByAccount.length > 0 && (
+          <section className="account-keys-section">
+            <div className="section-kicker"><span className="pulse-dot" /> API KEYS BREAKDOWN BY ACCOUNT</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '16px', marginTop: '12px' }}>
+              {keysByAccount.map((group) => {
+                const maxTokensInGroup = Math.max(...group.keys.map((k) => k.tokens || 0), 1);
+                return (
+                  <div className="account-keys-card" key={group.account_id}>
+                    <div className="account-group-header">
+                      <div>
+                        <div className="account-group-title">{group.account_label}</div>
+                        <div className="account-group-meta">
+                          {group.keys.length} {group.keys.length === 1 ? 'key' : 'keys'} · {fmtNum(group.total_tokens)} tokens
+                        </div>
+                      </div>
+                      <div className="account-group-spend">{fmtMoney(group.total_spend_usd)}</div>
+                    </div>
+                    <div>
+                      {group.keys.map((k, idx) => {
+                        const pct = Math.min(100, Math.round(((k.tokens || 0) / maxTokensInGroup) * 100));
+                        const color = KEY_PALETTE[idx % KEY_PALETTE.length];
+                        return (
+                          <div className="key-bar-row" key={k.key}>
+                            <div className="key-bar-header">
+                              <span className="key-bar-name" title={k.key}>
+                                <Key size={13} style={{ color, flexShrink: 0 }} />
+                                <span>{k.key}</span>
+                              </span>
+                              <div className="key-bar-stats">
+                                <span className="key-bar-tokens">{fmtNum(k.tokens)} tokens</span>
+                                <span>{fmtMoney(k.spend_usd)}</span>
+                              </div>
+                            </div>
+                            <div className="key-bar-track">
+                              <div className="key-bar-fill" style={{ width: `${pct}%`, background: color }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Most Used Model Spotlight */}
+        {topModels.length > 0 && (
+          <section className="card model-spotlight-card" style={{ marginTop: '20px' }}>
+            <div className="model-spotlight-left">
+              <span className="model-spotlight-badge">
+                <Sparkles size={13} /> MOST USED MODEL
+              </span>
+              <h3 className="model-spotlight-name" title={mostUsedModel?.model || 'None'}>
+                {mostUsedModel?.model || 'None detected'}
+              </h3>
+              <p className="muted" style={{ margin: 0, fontSize: '13px' }}>
+                Dominates usage across connected accounts in this period.
+              </p>
+              <div className="model-spotlight-stats">
+                <div>
+                  <small>SHARE OF TOKENS</small>
+                  <b>{mostUsedModel?.percentage || 0}%</b>
+                </div>
+                <div>
+                  <small>TOKENS PROCESSED</small>
+                  <b>{fmtNum(mostUsedModel?.tokens || 0)}</b>
+                </div>
+                <div>
+                  <small>REQUESTS</small>
+                  <b>{fmtNum(mostUsedModel?.requests || 0)}</b>
+                </div>
+                <div>
+                  <small>EST. SPEND</small>
+                  <b>{fmtMoney(mostUsedModel?.spend_usd || 0)}</b>
+                </div>
+              </div>
+            </div>
+
+            <div className="model-breakdown-list">
+              <div style={{ fontSize: '12px', fontWeight: 600, color: '#858ba3', letterSpacing: '0.06em', marginBottom: '12px', textTransform: 'uppercase' }}>
+                Top Models Breakdown
+              </div>
+              {topModels.slice(0, 5).map((m, idx) => {
+                const colors = ['#9b8cff', '#60d9ad', '#60a5fa', '#f59e0b', '#ec4899'];
+                const color = colors[idx % colors.length];
+                return (
+                  <div className="model-breakdown-row" key={m.model}>
+                    <div className="model-row-header">
+                      <span className="model-row-name" title={m.model}>
+                        <Cpu size={13} style={{ color, flexShrink: 0 }} />
+                        <span>{m.model}</span>
+                      </span>
+                      <div className="model-row-stats">
+                        <span className="model-row-tokens">{fmtNum(m.tokens)} tokens</span>
+                        <span>{m.percentage}%</span>
+                      </div>
+                    </div>
+                    <div className="model-row-track">
+                      <div className="model-row-fill" style={{ width: `${m.percentage}%`, background: color }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         <section className="card table-card">
           <div className="card-heading">
