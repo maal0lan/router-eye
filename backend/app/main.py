@@ -86,17 +86,25 @@ async def poll_loop():
 def _migrate_db():
     """Ensure user_id column exists on accounts table and is_admin on users table."""
     from sqlalchemy import text
-    with engine.connect() as conn:
+    
+    statements = [
+        "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS user_id INTEGER;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;"
+    ]
+    for stmt in statements:
         try:
-            conn.execute(text("ALTER TABLE accounts ADD COLUMN user_id INTEGER;"))
-            conn.commit()
+            with engine.connect() as conn:
+                conn.execute(text(stmt))
+                conn.commit()
         except Exception:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE;"))
-            conn.commit()
-        except Exception:
-            pass
+            # Fallback for SQLite which doesn't support IF NOT EXISTS in ADD COLUMN
+            try:
+                base_stmt = stmt.replace(" IF NOT EXISTS", "")
+                with engine.connect() as conn:
+                    conn.execute(text(base_stmt))
+                    conn.commit()
+            except Exception:
+                pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
