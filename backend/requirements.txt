@@ -7,3 +7,4 @@ cryptography==46.0.3
 python-multipart==0.0.20
 pydantic-settings==2.11.0
 itsdangerous
+bcrypt==4.3.0

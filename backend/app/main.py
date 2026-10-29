@@ -9,16 +9,28 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
+import bcrypt
 from .config import settings
 from .db import Base, engine, SessionLocal, get_db
-from .models import Account, DailySnapshot, UsageEvent, utcnow
+from .models import Account, DailySnapshot, UsageEvent, User, utcnow
 from .routers.analytics import router as analytics_router
 from .security import encrypt_secret, decrypt_secret
 from .openrouter import validate_key, fetch_analytics, fetch_key_analytics, OpenRouterError
 
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
 class LoginBody(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=300)
+
+class RegisterBody(BaseModel):
+    username: str = Field(min_length=2, max_length=50, pattern=r'^[a-zA-Z0-9_.-]+$')
+    password: str = Field(min_length=8, max_length=300)
+
 class AccountCreate(BaseModel):
     label: str = Field(min_length=1, max_length=80)
     management_key: str = Field(min_length=10, max_length=500)
@@ -74,11 +86,30 @@ async def lifespan(app: FastAPI):
     # Validate the Fernet key before accepting traffic.
     encrypt_secret("startup-check")
     Base.metadata.create_all(bind=engine)
+    # Seed the env-configured admin into the users table if they don't exist yet
+    _seed_admin()
     task = asyncio.create_task(poll_loop())
     yield
     task.cancel()
     try: await task
     except asyncio.CancelledError: pass
+
+def _seed_admin():
+    """Ensure the ADMIN_USERNAME/ADMIN_PASSWORD user exists in the DB."""
+    db = SessionLocal()
+    try:
+        existing = db.scalar(select(User).where(User.username == settings.admin_username))
+        if existing is None:
+            hashed = hash_password(settings.admin_password)
+            db.add(User(username=settings.admin_username, password_hash=hashed))
+            db.commit()
+        else:
+            # If the env password changed, update the hash so env always wins for admin
+            if not verify_password(settings.admin_password, existing.password_hash):
+                existing.password_hash = hash_password(settings.admin_password)
+                db.commit()
+    finally:
+        db.close()
 
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="routerscope_session", same_site="strict", https_only=settings.cookie_secure, max_age=60 * 60 * 12)
@@ -98,20 +129,40 @@ def account_json(account: Account):
 def health(): return {"ok": True, "app": settings.app_name}
 
 @app.post("/api/auth/login")
-def login(body: LoginBody, request: Request, response: Response):
-    # Constant-time comparisons reduce timing leakage. Configure a strong password before deployment.
-    ok_user = secrets.compare_digest(body.username, settings.admin_username)
-    ok_pass = secrets.compare_digest(body.password, settings.admin_password)
-    if not (ok_user and ok_pass): raise HTTPException(status_code=401, detail="Invalid username or password.")
+def login(body: LoginBody, request: Request, response: Response, db: Session = Depends(get_db)):
+    # Look up user in DB first (DB is source of truth after first boot)
+    user = db.scalar(select(User).where(User.username == body.username))
+    if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
     request.session.clear()
     request.session["authenticated"] = True
+    request.session["username"] = user.username
     request.session["csrf"] = secrets.token_urlsafe(32)
-    return {"authenticated": True, "csrf": request.session["csrf"]}
+    return {"authenticated": True, "csrf": request.session["csrf"], "username": user.username}
+
+@app.post("/api/auth/register")
+def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)):
+    """Create a new RouterScope account. Anyone can register; no invite needed."""
+    # Check duplicate
+    existing = db.scalar(select(User).where(User.username == body.username))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Username already taken. Please choose a different one.")
+    hashed = hash_password(body.password)
+    user = User(username=body.username, password_hash=hashed)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    # Auto-login after registration
+    request.session.clear()
+    request.session["authenticated"] = True
+    request.session["username"] = user.username
+    request.session["csrf"] = secrets.token_urlsafe(32)
+    return {"registered": True, "authenticated": True, "csrf": request.session["csrf"], "username": user.username}
 
 @app.get("/api/auth/me")
 def me(request: Request):
     if request.session.get("authenticated") is not True: return {"authenticated": False}
-    return {"authenticated": True, "csrf": request.session.get("csrf")}
+    return {"authenticated": True, "csrf": request.session.get("csrf"), "username": request.session.get("username")}
 
 @app.post("/api/auth/logout", dependencies=[Depends(require_auth)])
 def logout(request: Request):

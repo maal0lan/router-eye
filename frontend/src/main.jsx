@@ -83,20 +83,48 @@ async function api(path, opts = {}) {
 }
 
 function Login({ onLogin }) {
-  const [username, setUsername] = useState('maalolan');
+  const [mode, setMode] = useState('login'); // 'login' | 'register'
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [busy, setBusy] = useState(false);
+
+  function switchMode(next) {
+    setMode(next);
+    setError('');
+    setSuccess('');
+    setUsername('');
+    setPassword('');
+    setConfirmPassword('');
+  }
+
+  function validate() {
+    if (!username.trim()) return 'Username is required.';
+    if (username.length < 2) return 'Username must be at least 2 characters.';
+    if (!/^[a-zA-Z0-9_.-]+$/.test(username)) return 'Username can only contain letters, numbers, _ . -';
+    if (!password) return 'Password is required.';
+    if (mode === 'register') {
+      if (password.length < 8) return 'Password must be at least 8 characters.';
+      if (password !== confirmPassword) return 'Passwords do not match.';
+    }
+    return null;
+  }
 
   async function submit(event) {
     event.preventDefault();
-    setBusy(true);
     setError('');
+    setSuccess('');
+    const validationError = validate();
+    if (validationError) { setError(validationError); return; }
 
+    setBusy(true);
     try {
-      const data = await api('/api/auth/login', {
+      const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const data = await api(endpoint, {
         method: 'POST',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username: username.trim(), password }),
       });
       sessionStorage.setItem('routerscope_csrf', data.csrf);
       onLogin();
@@ -107,20 +135,25 @@ function Login({ onLogin }) {
     }
   }
 
+  const isRegister = mode === 'register';
+
   return (
     <main className="login-wrap">
       <div className="login-card">
         <div className="brand-mark"><Activity size={23} /></div>
         <div className="eyebrow">PRIVATE USAGE INTELLIGENCE</div>
         <h1>Welcome to RouterScope</h1>
-        <p className="muted">Sign in to manage your OpenRouter accounts.</p>
+        <p className="muted">
+          {isRegister ? 'Create your account to get started.' : 'Sign in to manage your OpenRouter accounts.'}
+        </p>
         <form onSubmit={submit}>
           <label>
             Username
             <input
               value={username}
               onChange={(event) => setUsername(event.target.value)}
-              autoComplete="username"
+              autoComplete={isRegister ? 'username' : 'username'}
+              placeholder={isRegister ? 'Pick a username (letters, numbers, _ . -)' : 'Your username'}
               required
             />
           </label>
@@ -130,15 +163,41 @@ function Login({ onLogin }) {
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
+              autoComplete={isRegister ? 'new-password' : 'current-password'}
+              placeholder={isRegister ? 'At least 8 characters' : ''}
               required
             />
           </label>
+          {isRegister && (
+            <label>
+              Confirm Password
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                autoComplete="new-password"
+                placeholder="Repeat your password"
+                required
+              />
+            </label>
+          )}
           {error && <div className="error">{error}</div>}
+          {success && <div className="success-msg">{success}</div>}
           <button className="primary full" disabled={busy}>
-            {busy ? 'Signing in…' : 'Sign in securely'}
+            {busy ? (isRegister ? 'Creating account…' : 'Signing in…') : (isRegister ? 'Create account' : 'Sign in securely')}
           </button>
         </form>
+        <div className="login-switch">
+          {isRegister ? (
+            <>Already have an account?{' '}
+              <button className="link-btn" onClick={() => switchMode('login')}>Sign in</button>
+            </>
+          ) : (
+            <>Don&apos;t have an account?{' '}
+              <button className="link-btn" onClick={() => switchMode('register')}>Create one</button>
+            </>
+          )}
+        </div>
         <div className="login-foot">
           <ShieldCheck size={15} /> Keys are stored encrypted on the server
         </div>

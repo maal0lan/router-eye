@@ -1,10 +1,20 @@
 from datetime import datetime, date, timezone
-from sqlalchemy import String, Integer, Float, Date, DateTime,UniqueConstraint, ForeignKey, Index, BigInteger, func, Text
+from sqlalchemy import String, Integer, Float, Date, DateTime, UniqueConstraint, ForeignKey, Index, BigInteger, func, Text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
 
 def utcnow(): return datetime.now(timezone.utc)
+
+
+class User(Base):
+    """Application users who can log in to RouterScope."""
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(300), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 class Account(Base):
     __tablename__ = "accounts"

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: router-eye-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: router-eye-db
+          property: connectionString
+      - key: ADMIN_USERNAME
+        sync: false   # Set in Render dashboard
+      - key: ADMIN_PASSWORD
+        sync: false   # Set in Render dashboard (min 16 chars)
+      - key: SESSION_SECRET
+        sync: false   # Set in Render dashboard (min 32 chars)
+      - key: ENCRYPTION_KEY
+        sync: false   # Set in Render dashboard (Fernet key)
+      - key: CORS_ORIGINS
+        sync: false   # Set to your Vercel URL e.g. https://router-eye.vercel.app
+      - key: COOKIE_SECURE
+        value: "true"
+
+databases:
+  - name: router-eye-db
+    databaseName: routerscope
+    user: routerscope
+    plan: free
