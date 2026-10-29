@@ -35,36 +35,39 @@ class AccountCreate(BaseModel):
     label: str = Field(min_length=1, max_length=80)
     management_key: str = Field(min_length=10, max_length=500)
 
+async def poll_account(account: Account, db: Session):
+    key = decrypt_secret(account.encrypted_key)
+    credits = await validate_key(key)
+    rows, _ = await fetch_analytics(key, days=30)
+    now = utcnow()
+    for row in rows:
+        snapshot = db.scalar(select(DailySnapshot).where(DailySnapshot.account_id == account.id, DailySnapshot.day == row["day"]))
+        if snapshot is None:
+            snapshot = DailySnapshot(account_id=account.id, day=row["day"])
+            db.add(snapshot)
+        snapshot.spend_usd = row["spend_usd"]
+        snapshot.requests = row["requests"]
+        snapshot.tokens = row["tokens"]
+        snapshot.total_credits = credits.get("total_credits")
+        snapshot.total_usage = credits.get("total_usage")
+        snapshot.captured_at = now
+    account.last_checked_at = now
+    account.last_error = None
+    db.commit()
+
 async def poll_all():
     db = SessionLocal()
     try:
         accounts = db.scalars(select(Account)).all()
         for account in accounts:
             try:
-                key = decrypt_secret(account.encrypted_key)
-                credits = await validate_key(key)
-                rows, _ = await fetch_analytics(key, days=30)
-                now = utcnow()
-                for row in rows:
-                    snapshot = db.scalar(select(DailySnapshot).where(DailySnapshot.account_id == account.id, DailySnapshot.day == row["day"]))
-                    if snapshot is None:
-                        snapshot = DailySnapshot(account_id=account.id, day=row["day"])
-                        db.add(snapshot)
-                    snapshot.spend_usd = row["spend_usd"]
-                    snapshot.requests = row["requests"]
-                    snapshot.tokens = row["tokens"]
-                    snapshot.total_credits = credits.get("total_credits")
-                    snapshot.total_usage = credits.get("total_usage")
-                    snapshot.captured_at = now
-                account.last_checked_at = now
-                account.last_error = None
-                db.commit()
+                await poll_account(account, db)
             except Exception as exc:
                 db.rollback()
-                account = db.get(Account, account.id)
-                if account:
-                    account.last_checked_at = utcnow()
-                    account.last_error = str(exc)[:300]
+                acc = db.get(Account, account.id)
+                if acc:
+                    acc.last_checked_at = utcnow()
+                    acc.last_error = str(exc)[:300]
                     db.commit()
     finally:
         db.close()
@@ -74,6 +77,16 @@ async def poll_loop():
         await asyncio.sleep(max(5, settings.poll_minutes) * 60)
         try: await poll_all()
         except Exception: pass
+
+def _migrate_db():
+    """Ensure user_id column exists on accounts table."""
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE accounts ADD COLUMN user_id INTEGER;"))
+            conn.commit()
+        except Exception:
+            pass
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -86,6 +99,7 @@ async def lifespan(app: FastAPI):
     # Validate the Fernet key before accepting traffic.
     encrypt_secret("startup-check")
     Base.metadata.create_all(bind=engine)
+    _migrate_db()
     # Seed the env-configured admin into the users table if they don't exist yet
     _seed_admin()
     task = asyncio.create_task(poll_loop())
@@ -95,27 +109,56 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError: pass
 
 def _seed_admin():
-    """Ensure the ADMIN_USERNAME/ADMIN_PASSWORD user exists in the DB."""
+    """Ensure the ADMIN_USERNAME/ADMIN_PASSWORD user exists in the DB and owns orphaned accounts."""
     db = SessionLocal()
     try:
-        existing = db.scalar(select(User).where(User.username == settings.admin_username))
-        if existing is None:
+        admin = db.scalar(select(User).where(User.username == settings.admin_username))
+        if admin is None:
             hashed = hash_password(settings.admin_password)
-            db.add(User(username=settings.admin_username, password_hash=hashed))
+            admin = User(username=settings.admin_username, password_hash=hashed)
+            db.add(admin)
             db.commit()
+            db.refresh(admin)
         else:
             # If the env password changed, update the hash so env always wins for admin
-            if not verify_password(settings.admin_password, existing.password_hash):
-                existing.password_hash = hash_password(settings.admin_password)
+            if not verify_password(settings.admin_password, admin.password_hash):
+                admin.password_hash = hash_password(settings.admin_password)
                 db.commit()
+        # Assign any unassigned accounts to the admin
+        orphaned = db.scalars(select(Account).where(Account.user_id.is_(None))).all()
+        for acc in orphaned:
+            acc.user_id = admin.id
+        if orphaned:
+            db.commit()
     finally:
         db.close()
 
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="routerscope_session", same_site="strict", https_only=settings.cookie_secure, max_age=60 * 60 * 12)
+same_site = "none" if settings.cookie_secure else "lax"
+app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, session_cookie="routerscope_session", same_site=same_site, https_only=settings.cookie_secure, max_age=60 * 60 * 12)
 origins = [x.strip() for x in settings.cors_origins.split(",") if x.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-CSRF-Token", "Accept", "Authorization"]
+)
 app.include_router(analytics_router)
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    if request.session.get("authenticated") is not True:
+        raise HTTPException(status_code=401, detail="Please sign in.")
+    user_id = request.session.get("user_id")
+    username = request.session.get("username")
+    user = None
+    if user_id:
+        user = db.get(User, user_id)
+    if not user and username:
+        user = db.scalar(select(User).where(User.username == username))
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Please sign in.")
+    return user
 
 def require_auth(request: Request):
     if request.session.get("authenticated") is not True:
@@ -136,6 +179,7 @@ def login(body: LoginBody, request: Request, response: Response, db: Session = D
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     request.session.clear()
     request.session["authenticated"] = True
+    request.session["user_id"] = user.id
     request.session["username"] = user.username
     request.session["csrf"] = secrets.token_urlsafe(32)
     return {"authenticated": True, "csrf": request.session["csrf"], "username": user.username}
@@ -155,6 +199,7 @@ def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)
     # Auto-login after registration
     request.session.clear()
     request.session["authenticated"] = True
+    request.session["user_id"] = user.id
     request.session["username"] = user.username
     request.session["csrf"] = secrets.token_urlsafe(32)
     return {"registered": True, "authenticated": True, "csrf": request.session["csrf"], "username": user.username}
@@ -176,44 +221,58 @@ def require_csrf(request: Request):
         if not sent or not expected or not secrets.compare_digest(sent, expected):
             raise HTTPException(status_code=403, detail="CSRF check failed. Refresh the page and retry.")
 
-@app.get("/api/accounts", dependencies=[Depends(require_auth)])
-def list_accounts(db: Session = Depends(get_db)):
-    return [account_json(a) for a in db.scalars(select(Account).order_by(Account.id)).all()]
+@app.get("/api/accounts")
+def list_accounts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [account_json(a) for a in db.scalars(select(Account).where(Account.user_id == current_user.id).order_by(Account.id)).all()]
 
-@app.post("/api/accounts", dependencies=[Depends(require_auth), Depends(require_csrf)])
-async def add_account(body: AccountCreate, db: Session = Depends(get_db)):
+@app.post("/api/accounts", dependencies=[Depends(require_csrf)])
+async def add_account(body: AccountCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try: await validate_key(body.management_key.strip())
     except OpenRouterError as exc: raise HTTPException(status_code=400, detail=str(exc)) from exc
-    account = Account(label=body.label.strip(), encrypted_key=encrypt_secret(body.management_key.strip()))
+    account = Account(
+        label=body.label.strip(),
+        encrypted_key=encrypt_secret(body.management_key.strip()),
+        user_id=current_user.id
+    )
     db.add(account); db.commit(); db.refresh(account)
+    # Immediately pull analytics so the user sees their stats without waiting
+    try:
+        await poll_account(account, db)
+    except Exception:
+        pass
     return account_json(account)
 
-@app.delete("/api/accounts/{account_id}", dependencies=[Depends(require_auth), Depends(require_csrf)])
-def delete_account(account_id: int, db: Session = Depends(get_db)):
-    account = db.get(Account, account_id)
+@app.delete("/api/accounts/{account_id}", dependencies=[Depends(require_csrf)])
+def delete_account(account_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    account = db.scalar(select(Account).where(Account.id == account_id, Account.user_id == current_user.id))
     if not account: raise HTTPException(status_code=404, detail="Account not found.")
     db.delete(account); db.commit()
     return {"ok": True}
 
-@app.post("/api/refresh", dependencies=[Depends(require_auth), Depends(require_csrf)])
-async def refresh():
-    await poll_all()
+@app.post("/api/refresh", dependencies=[Depends(require_csrf)])
+async def refresh(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    accounts = db.scalars(select(Account).where(Account.user_id == current_user.id)).all()
+    for acc in accounts:
+        try:
+            await poll_account(acc, db)
+        except Exception:
+            pass
     return {"ok": True, "refreshed_at": utcnow().isoformat()}
 
 class RequestResponse(BaseModel):
     ok: bool
     recorded_tokens: int
 
-@app.post("/api/request", response_model=RequestResponse, dependencies=[Depends(require_auth), Depends(require_csrf)])
+@app.post("/api/request", response_model=RequestResponse, dependencies=[Depends(require_csrf)])
 async def forward_request(
     model: str = Form(...),
     prompt_tokens: int = Form(0),
     completion_tokens: int = Form(0),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Read the first account for now - in a full implementation,
-    # the account would be selected based on routing logic
-    accounts = db.scalars(select(Account)).all()
+    # Read the first account for the current user
+    accounts = db.scalars(select(Account).where(Account.user_id == current_user.id)).all()
     if not accounts:
         return {"ok": False, "recorded_tokens": 0}
     account = accounts[0]
@@ -240,16 +299,16 @@ async def forward_request(
     return {"ok": True, "recorded_tokens": usage.get("total_tokens", 0) if usage else 0}
 
 
-@app.get("/api/dashboard", dependencies=[Depends(require_auth)])
-async def dashboard(days: int = 30, account_id: Optional[int] = None, db: Session = Depends(get_db)):
+@app.get("/api/dashboard")
+async def dashboard(days: int = 30, account_id: Optional[int] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     days = max(1, min(days, 365))
     start = date.today() - timedelta(days=days - 1)
-    account_stmt = select(Account)
+    account_stmt = select(Account).where(Account.user_id == current_user.id)
     if account_id is not None: account_stmt = account_stmt.where(Account.id == account_id)
     accounts = db.scalars(account_stmt.order_by(Account.id)).all()
     ids = [a.id for a in accounts]
     if not ids:
-        return {"summary": {"spend_usd": 0, "requests": 0, "tokens": 0, "accounts": 0, "credits_remaining": 0}, "series": [], "accounts": [], "top_keys": [], "key_trend": []}
+        return {"summary": {"spend_usd": 0, "requests": 0, "tokens": 0, "accounts": 0, "credits_remaining": 0}, "series": [], "accounts": [], "top_keys": [], "key_trend": [], "top_key_names": []}
     rows = db.scalars(select(DailySnapshot).where(DailySnapshot.account_id.in_(ids), DailySnapshot.day >= start).order_by(DailySnapshot.day)).all()
     by_day = {}
     per_account = {a.id: {"id": a.id, "label": a.label, "spend_usd": 0.0, "requests": 0, "tokens": 0, "credits_remaining": None, "last_error": a.last_error} for a in accounts}
@@ -315,9 +374,9 @@ async def dashboard(days: int = 30, account_id: Optional[int] = None, db: Sessio
         "top_key_names": top_key_names
     }
 
-@app.get("/api/history", dependencies=[Depends(require_auth)])
-def history(days: int = 90, account_id: Optional[int] = None, db: Session = Depends(get_db)):
+@app.get("/api/history")
+def history(days: int = 90, account_id: Optional[int] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     days = max(1, min(days, 365)); start = date.today() - timedelta(days=days - 1)
-    stmt = select(DailySnapshot, Account.label).join(Account).where(DailySnapshot.day >= start).order_by(DailySnapshot.day)
+    stmt = select(DailySnapshot, Account.label).join(Account).where(Account.user_id == current_user.id, DailySnapshot.day >= start).order_by(DailySnapshot.day)
     if account_id is not None: stmt = stmt.where(DailySnapshot.account_id == account_id)
     return [{"day": r.day.isoformat(), "account_id": r.account_id, "account": label, "spend_usd": r.spend_usd, "requests": r.requests, "tokens": r.tokens, "captured_at": r.captured_at.isoformat()} for r, label in db.execute(stmt).all()]

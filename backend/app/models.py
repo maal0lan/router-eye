@@ -15,15 +15,18 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(300), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    accounts: Mapped[list["Account"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 class Account(Base):
     __tablename__ = "accounts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     label: Mapped[str] = mapped_column(String(80), nullable=False)
     encrypted_key: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    user: Mapped[User | None] = relationship(back_populates="accounts")
     snapshots: Mapped[list["DailySnapshot"]] = relationship(back_populates="account", cascade="all, delete-orphan")
 
 class UsageEvent(Base):
