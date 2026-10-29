@@ -31,6 +31,11 @@ class RegisterBody(BaseModel):
     username: str = Field(min_length=2, max_length=50, pattern=r'^[a-zA-Z0-9_.-]+$')
     password: str = Field(min_length=8, max_length=300)
 
+class UserCreateAdmin(BaseModel):
+    username: str = Field(min_length=2, max_length=50, pattern=r'^[a-zA-Z0-9_.-]+$')
+    password: str = Field(min_length=8, max_length=300)
+    is_admin: bool = False
+
 class AccountCreate(BaseModel):
     label: str = Field(min_length=1, max_length=80)
     management_key: str = Field(min_length=10, max_length=500)
@@ -79,11 +84,16 @@ async def poll_loop():
         except Exception: pass
 
 def _migrate_db():
-    """Ensure user_id column exists on accounts table."""
+    """Ensure user_id column exists on accounts table and is_admin on users table."""
     from sqlalchemy import text
     with engine.connect() as conn:
         try:
             conn.execute(text("ALTER TABLE accounts ADD COLUMN user_id INTEGER;"))
+            conn.commit()
+        except Exception:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE;"))
             conn.commit()
         except Exception:
             pass
@@ -109,21 +119,22 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError: pass
 
 def _seed_admin():
-    """Ensure the ADMIN_USERNAME/ADMIN_PASSWORD user exists in the DB and owns orphaned accounts."""
+    """Ensure the ADMIN_USERNAME/ADMIN_PASSWORD user exists in the DB, is super admin, and owns orphaned accounts."""
     db = SessionLocal()
     try:
         admin = db.scalar(select(User).where(User.username == settings.admin_username))
         if admin is None:
             hashed = hash_password(settings.admin_password)
-            admin = User(username=settings.admin_username, password_hash=hashed)
+            admin = User(username=settings.admin_username, password_hash=hashed, is_admin=True)
             db.add(admin)
             db.commit()
             db.refresh(admin)
         else:
+            admin.is_admin = True
             # If the env password changed, update the hash so env always wins for admin
             if not verify_password(settings.admin_password, admin.password_hash):
                 admin.password_hash = hash_password(settings.admin_password)
-                db.commit()
+            db.commit()
         # Assign any unassigned accounts to the admin
         orphaned = db.scalars(select(Account).where(Account.user_id.is_(None))).all()
         for acc in orphaned:
@@ -160,6 +171,11 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
         raise HTTPException(status_code=401, detail="Please sign in.")
     return user
 
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Super Admin access required.")
+    return current_user
+
 def require_auth(request: Request):
     if request.session.get("authenticated") is not True:
         raise HTTPException(status_code=401, detail="Please sign in.")
@@ -181,8 +197,9 @@ def login(body: LoginBody, request: Request, response: Response, db: Session = D
     request.session["authenticated"] = True
     request.session["user_id"] = user.id
     request.session["username"] = user.username
+    request.session["is_admin"] = user.is_admin
     request.session["csrf"] = secrets.token_urlsafe(32)
-    return {"authenticated": True, "csrf": request.session["csrf"], "username": user.username}
+    return {"authenticated": True, "csrf": request.session["csrf"], "username": user.username, "is_admin": user.is_admin}
 
 @app.post("/api/auth/register")
 def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)):
@@ -192,7 +209,7 @@ def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)
     if existing is not None:
         raise HTTPException(status_code=409, detail="Username already taken. Please choose a different one.")
     hashed = hash_password(body.password)
-    user = User(username=body.username, password_hash=hashed)
+    user = User(username=body.username, password_hash=hashed, is_admin=False)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -201,13 +218,22 @@ def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)
     request.session["authenticated"] = True
     request.session["user_id"] = user.id
     request.session["username"] = user.username
+    request.session["is_admin"] = user.is_admin
     request.session["csrf"] = secrets.token_urlsafe(32)
-    return {"registered": True, "authenticated": True, "csrf": request.session["csrf"], "username": user.username}
+    return {"registered": True, "authenticated": True, "csrf": request.session["csrf"], "username": user.username, "is_admin": user.is_admin}
 
 @app.get("/api/auth/me")
-def me(request: Request):
+def me(request: Request, db: Session = Depends(get_db)):
     if request.session.get("authenticated") is not True: return {"authenticated": False}
-    return {"authenticated": True, "csrf": request.session.get("csrf"), "username": request.session.get("username")}
+    user_id = request.session.get("user_id")
+    username = request.session.get("username")
+    is_admin = False
+    if user_id:
+        user = db.get(User, user_id)
+        if user:
+            is_admin = user.is_admin
+            username = user.username
+    return {"authenticated": True, "csrf": request.session.get("csrf"), "username": username, "is_admin": is_admin}
 
 @app.post("/api/auth/logout", dependencies=[Depends(require_auth)])
 def logout(request: Request):
@@ -299,11 +325,86 @@ async def forward_request(
     return {"ok": True, "recorded_tokens": usage.get("total_tokens", 0) if usage else 0}
 
 
+@app.get("/api/admin/users")
+def list_admin_users(current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    users = db.scalars(select(User).order_by(User.id)).all()
+    result = []
+    for u in users:
+        accs = db.scalars(select(Account).where(Account.user_id == u.id)).all()
+        acc_ids = [a.id for a in accs]
+        spend = 0.0
+        tokens = 0
+        requests = 0
+        if acc_ids:
+            stats = db.execute(
+                select(
+                    func.coalesce(func.sum(DailySnapshot.spend_usd), 0),
+                    func.coalesce(func.sum(DailySnapshot.tokens), 0),
+                    func.coalesce(func.sum(DailySnapshot.requests), 0),
+                ).where(DailySnapshot.account_id.in_(acc_ids))
+            ).first()
+            if stats:
+                spend = float(stats[0] or 0.0)
+                tokens = int(stats[1] or 0)
+                requests = int(stats[2] or 0)
+        result.append({
+            "id": u.id,
+            "username": u.username,
+            "is_admin": u.is_admin,
+            "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "accounts_count": len(accs),
+            "accounts": [{"id": a.id, "label": a.label, "last_error": a.last_error} for a in accs],
+            "total_spend_usd": spend,
+            "total_tokens": tokens,
+            "total_requests": requests,
+        })
+    return result
+
+@app.post("/api/admin/users", dependencies=[Depends(require_csrf)])
+def create_admin_user(body: UserCreateAdmin, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    existing = db.scalar(select(User).where(User.username == body.username))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Username already taken.")
+    hashed = hash_password(body.password)
+    user = User(username=body.username, password_hash=hashed, is_admin=body.is_admin)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"ok": True, "id": user.id, "username": user.username, "is_admin": user.is_admin}
+
+@app.delete("/api/admin/users/{user_id}", dependencies=[Depends(require_csrf)])
+def delete_admin_user(user_id: int, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    db.delete(target)
+    db.commit()
+    return {"ok": True}
+
 @app.get("/api/dashboard")
-async def dashboard(days: int = 30, account_id: Optional[int] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def dashboard(
+    days: int = 30,
+    account_id: Optional[int] = None,
+    user_scope: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     days = max(1, min(days, 365))
     start = date.today() - timedelta(days=days - 1)
-    account_stmt = select(Account).where(Account.user_id == current_user.id)
+    
+    # Super Admin can view all users' accounts or filter by specific user
+    account_stmt = select(Account)
+    if current_user.is_admin and user_scope == "all":
+        # All accounts in system
+        pass
+    elif current_user.is_admin and user_scope and user_scope.isdigit():
+        account_stmt = account_stmt.where(Account.user_id == int(user_scope))
+    else:
+        account_stmt = account_stmt.where(Account.user_id == current_user.id)
+
     if account_id is not None: account_stmt = account_stmt.where(Account.id == account_id)
     accounts = db.scalars(account_stmt.order_by(Account.id)).all()
     ids = [a.id for a in accounts]

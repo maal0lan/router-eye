@@ -17,6 +17,10 @@ import {
   Clock3,
   Trash2,
   Key,
+  Globe,
+  UserPlus,
+  UserCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -249,6 +253,16 @@ function CustomTokenTooltip({ active, payload, label, topKeyNames = [] }) {
 
 function App() {
   const [authenticated, setAuthenticated] = useState(null);
+  const [currentUser, setCurrentUser] = useState({ username: '', is_admin: false });
+  const [adminTab, setAdminTab] = useState('overview'); // 'overview' | 'users'
+  const [userScope, setUserScope] = useState('me'); // 'me' | 'all'
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [showAddUser, setShowAddUser] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newIsAdmin, setNewIsAdmin] = useState(false);
+  const [addingUser, setAddingUser] = useState(false);
+
   const [accounts, setAccounts] = useState([]);
   const [dashboard, setDashboard] = useState(null);
   const [days, setDays] = useState(30);
@@ -266,10 +280,54 @@ function App() {
     api('/api/auth/me')
       .then((data) => {
         setAuthenticated(data.authenticated);
+        if (data.authenticated) {
+          setCurrentUser({ username: data.username || '', is_admin: !!data.is_admin });
+        }
         if (data.csrf) sessionStorage.setItem('routerscope_csrf', data.csrf);
       })
       .catch(() => setAuthenticated(false));
   }, []);
+
+  async function loadAdminUsers() {
+    try {
+      const data = await api('/api/admin/users');
+      setAdminUsers(data);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleCreateUser(e) {
+    e.preventDefault();
+    setAddingUser(true);
+    try {
+      await api('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({ username: newUsername.trim(), password: newPassword, is_admin: newIsAdmin }),
+      });
+      setShowAddUser(false);
+      setNewUsername('');
+      setNewPassword('');
+      setNewIsAdmin(false);
+      setNotice('User created successfully.');
+      await loadAdminUsers();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAddingUser(false);
+    }
+  }
+
+  async function handleDeleteUser(userObj) {
+    if (!window.confirm(`Delete user "${userObj.username}" and all their accounts and usage history?`)) return;
+    try {
+      await api(`/api/admin/users/${userObj.id}`, { method: 'DELETE' });
+      setNotice(`User ${userObj.username} deleted.`);
+      await loadAdminUsers();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
   async function load() {
     setLoading(true);
@@ -277,9 +335,10 @@ function App() {
 
     try {
       const accountPath = '/api/accounts';
+      const scopeParam = currentUser.is_admin && userScope ? `&user_scope=${userScope}` : '';
       const dashboardPath = `/api/dashboard?days=${days}${
         filter !== 'all' ? `&account_id=${encodeURIComponent(filter)}` : ''
-      }`;
+      }${scopeParam}`;
       const [accountData, dashboardData] = await Promise.all([
         api(accountPath),
         api(dashboardPath),
@@ -316,9 +375,14 @@ function App() {
   }
 
   useEffect(() => {
-    if (authenticated) load();
+    if (authenticated) {
+      load();
+      if (currentUser.is_admin && adminTab === 'users') {
+        loadAdminUsers();
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authenticated, days, filter]);
+  }, [authenticated, days, filter, userScope, adminTab]);
 
   async function addAccount(event) {
     event.preventDefault();
@@ -412,45 +476,116 @@ function App() {
     return <Login onLogin={() => setAuthenticated(true)} />;
   }
 
+  const isSuperAdmin = currentUser.is_admin;
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="logo">
-          <div className="logo-mark"><Activity size={21} /></div>
-          <span>Router<span className="logo-light">Scope</span></span>
-          <span className="version">BETA</span>
-        </div>
-        <div className="side-label">WORKSPACE</div>
-        <button className="nav-item active"><Layers3 size={17} /> Overview</button>
-        <button className="nav-item" onClick={() => setShowAdd(true)}>
-          <KeyRound size={17} /> Accounts <span className="nav-count">{accounts.length}</span>
-        </button>
-        <div className="side-bottom">
-          <div className="secure-status">
-            <span className="status-dot" />
-            <div><b>Local encryption</b><small>Secrets protected at rest</small></div>
+      {/* 
+        Sidebar: Visible for Super Admin to navigate Admin controls & User management.
+        Hidden/Commented for normal users as requested.
+      */}
+      {isSuperAdmin && (
+        <aside className="sidebar">
+          <div className="logo">
+            <div className="logo-mark"><Activity size={21} /></div>
+            <span>Router<span className="logo-light">Scope</span></span>
+            <span className="version">ADMIN</span>
           </div>
-          <button className="nav-item logout" onClick={logout}>
-            <LogOut size={17} /> Sign out
+          <div className="side-label">ADMIN CONTROLS</div>
+          <button
+            className={`nav-item ${adminTab === 'overview' && userScope === 'me' ? 'active' : ''}`}
+            onClick={() => { setAdminTab('overview'); setUserScope('me'); }}
+          >
+            <Layers3 size={17} /> My Accounts <span className="nav-count">{accounts.length}</span>
           </button>
-        </div>
-      </aside>
+          <button
+            className={`nav-item ${adminTab === 'overview' && userScope === 'all' ? 'active' : ''}`}
+            onClick={() => { setAdminTab('overview'); setUserScope('all'); }}
+          >
+            <Globe size={17} /> All Users Usage
+          </button>
+          <button
+            className={`nav-item ${adminTab === 'users' ? 'active' : ''}`}
+            onClick={() => { setAdminTab('users'); loadAdminUsers(); }}
+          >
+            <Users size={17} /> Manage Users
+          </button>
+          <div className="side-bottom">
+            <div className="secure-status">
+              <span className="status-dot" />
+              <div><b>Super Admin</b><small>Full control</small></div>
+            </div>
+            <button className="nav-item logout" onClick={logout}>
+              <LogOut size={17} /> Sign out
+            </button>
+          </div>
+        </aside>
+      )}
 
-      <main className="main">
+      <main className={`main ${!isSuperAdmin ? 'full-width' : ''}`}>
+        {/* Brand header for regular users where sidebar is hidden */}
+        {!isSuperAdmin && (
+          <div className="header-brand">
+            <div className="logo-mark"><Activity size={21} /></div>
+            <span>Router<span className="logo-light">Scope</span></span>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div className="user-badge">
+                <div className="user-avatar">{currentUser.username ? currentUser.username.slice(0, 2).toUpperCase() : 'U'}</div>
+                <span>{currentUser.username}</span>
+                <span className="user-role-pill member">MEMBER</span>
+              </div>
+              <button className="icon-button" onClick={logout} title="Sign out">
+                <LogOut size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
         <header className="topbar">
           <div>
-            <div className="eyebrow">USAGE OVERVIEW</div>
-            <h1>Your AI spend & tokens, in one place.</h1>
-            <p className="muted">Monitor every connected OpenRouter account and API key from one dashboard.</p>
+            <div className="eyebrow">
+              {isSuperAdmin
+                ? (adminTab === 'users' ? 'USER DIRECTORY' : (userScope === 'all' ? 'ALL USERS USAGE' : 'SUPER ADMIN WORKSPACE'))
+                : 'USAGE OVERVIEW'}
+            </div>
+            <h1>
+              {isSuperAdmin
+                ? (adminTab === 'users' ? 'Registered Users Management' : (userScope === 'all' ? 'System-wide Spend & Tokens' : 'Your AI spend & tokens, in one place.'))
+                : 'Your AI spend & tokens, in one place.'}
+            </h1>
+            <p className="muted">
+              {isSuperAdmin && adminTab === 'users'
+                ? 'Manage all registered accounts, see their active keys, and track token usage.'
+                : 'Monitor connected OpenRouter accounts and API keys from one dashboard.'}
+            </p>
           </div>
           <div className="top-actions">
-            <span className="live-pill"><span className="status-dot" /> PRIVATE WORKSPACE</span>
-            <button className="icon-button" onClick={refresh} title="Refresh usage" disabled={loading}>
-              <RefreshCw size={16} className={loading ? 'spin' : ''} />
-            </button>
-            <button className="primary" onClick={() => setShowAdd(true)}>
-              <Plus size={17} /> Add account
-            </button>
+            {isSuperAdmin && (
+              <div className="user-badge">
+                <div className="user-avatar">{currentUser.username ? currentUser.username.slice(0, 2).toUpperCase() : 'A'}</div>
+                <span>{currentUser.username}</span>
+                <span className="user-role-pill admin">SUPER ADMIN</span>
+              </div>
+            )}
+            {adminTab === 'users' ? (
+              <button className="primary" onClick={() => setShowAddUser(true)}>
+                <UserPlus size={17} /> Add User
+              </button>
+            ) : (
+              <>
+                <button className="icon-button" onClick={refresh} title="Refresh usage" disabled={loading}>
+                  <RefreshCw size={16} className={loading ? 'spin' : ''} />
+                </button>
+                <button className="primary" onClick={() => setShowAdd(true)}>
+                  <Plus size={17} /> Add account
+                </button>
+                {isSuperAdmin && (
+                  <button className="icon-button" onClick={logout} title="Sign out">
+                    <LogOut size={16} />
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </header>
 
@@ -467,18 +602,93 @@ function App() {
           </div>
         )}
 
-        <section className="toolbar">
-          <div className="section-kicker"><span className="pulse-dot" /> LIVE MONITORING</div>
-          <div className="toolbar-right">
-            <label className="filter-label">
-              Account
-              <select value={filter} onChange={(event) => setFilter(event.target.value)}>
-                <option value="all">All accounts</option>
-                {accounts.map((account) => (
-                  <option value={account.id} key={account.id}>{account.label}</option>
-                ))}
-              </select>
-            </label>
+        {isSuperAdmin && adminTab === 'users' ? (
+          <section className="card table-card" style={{ marginTop: '20px' }}>
+            <div className="card-heading">
+              <div>
+                <h2>Registered Users ({adminUsers.length})</h2>
+                <p className="muted">All system users, their connected accounts, and their token consumption.</p>
+              </div>
+              <button className="primary" onClick={() => setShowAddUser(true)}>
+                <UserPlus size={16} /> Add User
+              </button>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>USER</th>
+                    <th>ROLE</th>
+                    <th>ACCOUNTS</th>
+                    <th>TOTAL SPEND</th>
+                    <th>TOTAL TOKENS</th>
+                    <th>REQUESTS</th>
+                    <th>JOINED</th>
+                    <th>ACTIONS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {adminUsers.map((u) => {
+                    const isSelf = u.id === currentUser.id || u.username === currentUser.username;
+                    return (
+                      <tr key={u.id}>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <div className="user-avatar" style={{ width: '28px', height: '28px', fontSize: '12px' }}>
+                              {u.username.slice(0, 2).toUpperCase()}
+                            </div>
+                            <b>{u.username}</b>
+                            {isSelf && <small className="muted">(You)</small>}
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`user-role-pill ${u.is_admin ? 'admin' : 'member'}`}>
+                            {u.is_admin ? 'SUPER ADMIN' : 'MEMBER'}
+                          </span>
+                        </td>
+                        <td>
+                          <span title={u.accounts.map((a) => a.label).join(', ')}>
+                            {u.accounts_count} {u.accounts_count === 1 ? 'key' : 'keys'}
+                          </span>
+                        </td>
+                        <td className="table-money">{fmtMoney(u.total_spend_usd)}</td>
+                        <td>{fmtNum(u.total_tokens)}</td>
+                        <td>{fmtNum(u.total_requests)}</td>
+                        <td>{u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}</td>
+                        <td>
+                          <button
+                            className="btn-danger"
+                            onClick={() => handleDeleteUser(u)}
+                            disabled={isSelf}
+                            title={isSelf ? 'Cannot delete yourself' : `Delete ${u.username}`}
+                          >
+                            <Trash2 size={13} /> Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {adminUsers.length === 0 && (
+                <div className="table-empty">No users found.</div>
+              )}
+            </div>
+          </section>
+        ) : (
+          <>
+            <section className="toolbar">
+              <div className="section-kicker"><span className="pulse-dot" /> LIVE MONITORING</div>
+              <div className="toolbar-right">
+                <label className="filter-label">
+                  Account
+                  <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+                    <option value="all">All accounts</option>
+                    {accounts.map((account) => (
+                      <option value={account.id} key={account.id}>{account.label}</option>
+                    ))}
+                  </select>
+                </label>
             <div className="segmented">
               {[7, 30, 90].map((numberOfDays) => (
                 <button
@@ -817,12 +1027,66 @@ function App() {
             )}
           </div>
         </section>
+        </>
+      )}
 
         <footer className="footer">
-          <span>RouterScope <span className="muted">· Personal usage analytics</span></span>
+          <span>RouterScope <span className="muted">· Usage analytics</span></span>
           <span><ShieldCheck size={13} /> Encrypted credentials · Private by design</span>
         </footer>
       </main>
+
+      {/* Super Admin: Create User Modal */}
+      {showAddUser && (
+        <div className="modal-backdrop" role="presentation" onClick={(e) => {
+          if (e.target === e.currentTarget && !addingUser) setShowAddUser(false);
+        }}>
+          <section className="modal-card" role="dialog" aria-modal="true">
+            <div className="card-heading">
+              <div>
+                <h2>Create New User</h2>
+                <p className="muted">Provision a new account on RouterScope.</p>
+              </div>
+              <button className="text-button" type="button" onClick={() => setShowAddUser(false)} disabled={addingUser}>Close</button>
+            </div>
+            <form onSubmit={handleCreateUser}>
+              <label>
+                Username
+                <input
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  placeholder="letters, numbers, _ . -"
+                  required
+                />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  required
+                />
+              </label>
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={newIsAdmin}
+                  onChange={(e) => setNewIsAdmin(e.target.checked)}
+                />
+                Grant Super Admin Privileges
+              </label>
+              <div className="modal-actions" style={{ marginTop: '20px' }}>
+                <button type="button" className="subtle-button" onClick={() => setShowAddUser(false)} disabled={addingUser}>Cancel</button>
+                <button type="submit" className="primary" disabled={addingUser}>
+                  {addingUser ? 'Creating…' : 'Create User'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
 
       {showAdd && (
         <div className="modal-backdrop" role="presentation" onClick={(event) => {

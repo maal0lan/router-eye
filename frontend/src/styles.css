@@ -1187,3 +1187,140 @@ tbody tr:hover {
     font-size: 23px;
   }
 }
+
+/* User Badge & Full-Width Header */
+.main.full-width {
+  margin-left: 0;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 30px clamp(20px, 4vw, 50px);
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 700 20px 'Space Grotesk', sans-serif;
+  letter-spacing: -.8px;
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #1f2538;
+}
+
+.user-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  background: #151a2a;
+  border: 1px solid #2a3044;
+  padding: 6px 14px;
+  border-radius: 30px;
+  font-size: 13px;
+}
+
+.user-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7b68f4, #b09cff);
+  color: #fff;
+  font: 700 11px 'Space Grotesk', sans-serif;
+  display: grid;
+  place-items: center;
+}
+
+.user-role-pill {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 12px;
+  letter-spacing: 0.5px;
+}
+
+.user-role-pill.admin {
+  background: #2b1f48;
+  color: #c4b5fd;
+  border: 1px solid #7c3aed;
+}
+
+.user-role-pill.member {
+  background: #18282e;
+  color: #6ee7b7;
+  border: 1px solid #059669;
+}
+
+/* Admin Tabs & Scope Switcher */
+.admin-scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  background: #111522;
+  border: 1px solid #242a3b;
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+.admin-scope-btn {
+  background: transparent;
+  border: 0;
+  color: #858ba3;
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: all 0.15s ease;
+}
+
+.admin-scope-btn:hover {
+  color: #f2f3fc;
+  background: #1b2135;
+}
+
+.admin-scope-btn.active {
+  background: #7b68f4;
+  color: #fff;
+}
+
+/* User Management Table & Actions */
+.btn-danger {
+  background: #3b1b22;
+  border: 1px solid #6b212f;
+  color: #f87171;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #5c202d;
+  color: #fca5a5;
+}
+
+.btn-danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #cbd5e1;
+  margin-top: 10px;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #7b68f4;
+  cursor: pointer;
+}
