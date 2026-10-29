@@ -281,7 +281,12 @@ function App() {
       .then((data) => {
         setAuthenticated(data.authenticated);
         if (data.authenticated) {
-          setCurrentUser({ username: data.username || '', is_admin: !!data.is_admin });
+          const isAdmin = !!data.is_admin;
+          setCurrentUser({ username: data.username || '', is_admin: isAdmin });
+          if (!isAdmin) {
+            setAdminTab('overview');
+            setUserScope('me');
+          }
         }
         if (data.csrf) sessionStorage.setItem('routerscope_csrf', data.csrf);
       })
@@ -289,6 +294,7 @@ function App() {
   }, []);
 
   async function loadAdminUsers() {
+    if (!currentUser.is_admin) return;
     try {
       const data = await api('/api/admin/users');
       setAdminUsers(data);
@@ -443,6 +449,9 @@ function App() {
     } finally {
       sessionStorage.removeItem('routerscope_csrf');
       setAuthenticated(false);
+      setCurrentUser({ username: '', is_admin: false });
+      setAdminTab('overview');
+      setUserScope('me');
     }
   }
 
