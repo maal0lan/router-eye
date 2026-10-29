@@ -130,8 +130,11 @@ function Login({ onLogin }) {
         method: 'POST',
         body: JSON.stringify({ username: username.trim(), password }),
       });
-      sessionStorage.setItem('routerscope_csrf', data.csrf);
-      onLogin();
+      if (data.csrf) sessionStorage.setItem('routerscope_csrf', data.csrf);
+      const isSuper = Boolean(data.is_admin || (data.username && data.username.toLowerCase() === 'maalolan') || username.trim().toLowerCase() === 'maalolan');
+      const userPayload = { username: data.username || username.trim(), is_admin: isSuper };
+      sessionStorage.setItem('routerscope_user', JSON.stringify(userPayload));
+      onLogin(userPayload);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -253,7 +256,13 @@ function CustomTokenTooltip({ active, payload, label, topKeyNames = [] }) {
 
 function App() {
   const [authenticated, setAuthenticated] = useState(null);
-  const [currentUser, setCurrentUser] = useState({ username: '', is_admin: false });
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('routerscope_user');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return { username: '', is_admin: false };
+  });
   const [adminTab, setAdminTab] = useState('overview'); // 'overview' | 'users'
   const [userScope, setUserScope] = useState('me'); // 'me' | 'all'
   const [adminUsers, setAdminUsers] = useState([]);
@@ -276,14 +285,27 @@ function App() {
   const [notice, setNotice] = useState('');
   const [graphMode, setGraphMode] = useState('tokens'); // 'spend' | 'tokens'
 
+  function handleLogin(userPayload) {
+    const isSuper = Boolean(
+      userPayload?.is_admin ||
+      (userPayload?.username && userPayload.username.toLowerCase() === 'maalolan')
+    );
+    const finalUser = { username: userPayload?.username || '', is_admin: isSuper };
+    setCurrentUser(finalUser);
+    setAuthenticated(true);
+    sessionStorage.setItem('routerscope_user', JSON.stringify(finalUser));
+  }
+
   useEffect(() => {
     api('/api/auth/me')
       .then((data) => {
         setAuthenticated(data.authenticated);
         if (data.authenticated) {
-          const isAdmin = !!data.is_admin;
-          setCurrentUser({ username: data.username || '', is_admin: isAdmin });
-          if (!isAdmin) {
+          const isSuper = Boolean(data.is_admin || (data.username && data.username.toLowerCase() === 'maalolan'));
+          const finalUser = { username: data.username || '', is_admin: isSuper };
+          setCurrentUser(finalUser);
+          sessionStorage.setItem('routerscope_user', JSON.stringify(finalUser));
+          if (!isSuper) {
             setAdminTab('overview');
             setUserScope('me');
           }
@@ -482,7 +504,7 @@ function App() {
   }
 
   if (!authenticated) {
-    return <Login onLogin={() => setAuthenticated(true)} />;
+    return <Login onLogin={handleLogin} />;
   }
 
   const isSuperAdmin = Boolean(currentUser.is_admin || (currentUser.username && currentUser.username.toLowerCase() === 'maalolan'));
