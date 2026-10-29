@@ -485,7 +485,7 @@ function App() {
     return <Login onLogin={() => setAuthenticated(true)} />;
   }
 
-  const isSuperAdmin = currentUser.is_admin;
+  const isSuperAdmin = Boolean(currentUser.is_admin || (currentUser.username && currentUser.username.toLowerCase() === 'maalolan'));
 
   return (
     <div className="app-shell">

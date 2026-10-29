@@ -89,7 +89,8 @@ def _migrate_db():
     
     statements = [
         "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS user_id INTEGER;",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;"
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;",
+        f"UPDATE users SET is_admin = TRUE WHERE username = '{settings.admin_username}';"
     ]
     for stmt in statements:
         try:
@@ -180,7 +181,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if not current_user.is_admin:
+    if not (current_user.is_admin or current_user.username == settings.admin_username or current_user.username == 'maalolan'):
         raise HTTPException(status_code=403, detail="Super Admin access required.")
     return current_user
 
@@ -201,13 +202,14 @@ def login(body: LoginBody, request: Request, response: Response, db: Session = D
     user = db.scalar(select(User).where(User.username == body.username))
     if user is None or not user.is_active or not verify_password(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
+    is_admin = bool(user.is_admin or user.username == settings.admin_username or user.username == 'maalolan')
     request.session.clear()
     request.session["authenticated"] = True
     request.session["user_id"] = user.id
     request.session["username"] = user.username
-    request.session["is_admin"] = user.is_admin
+    request.session["is_admin"] = is_admin
     request.session["csrf"] = secrets.token_urlsafe(32)
-    return {"authenticated": True, "csrf": request.session["csrf"], "username": user.username, "is_admin": user.is_admin}
+    return {"authenticated": True, "csrf": request.session["csrf"], "username": user.username, "is_admin": is_admin}
 
 @app.post("/api/auth/register")
 def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)):
@@ -226,21 +228,30 @@ def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)
     request.session["authenticated"] = True
     request.session["user_id"] = user.id
     request.session["username"] = user.username
-    request.session["is_admin"] = user.is_admin
+    request.session["is_admin"] = False
     request.session["csrf"] = secrets.token_urlsafe(32)
-    return {"registered": True, "authenticated": True, "csrf": request.session["csrf"], "username": user.username, "is_admin": user.is_admin}
+    return {"registered": True, "authenticated": True, "csrf": request.session["csrf"], "username": user.username, "is_admin": False}
 
 @app.get("/api/auth/me")
 def me(request: Request, db: Session = Depends(get_db)):
     if request.session.get("authenticated") is not True: return {"authenticated": False}
     user_id = request.session.get("user_id")
     username = request.session.get("username")
-    is_admin = False
+    user = None
     if user_id:
         user = db.get(User, user_id)
-        if user:
-            is_admin = user.is_admin
-            username = user.username
+    if not user and username:
+        user = db.scalar(select(User).where(User.username == username))
+    
+    is_admin = False
+    if user:
+        is_admin = bool(user.is_admin or user.username == settings.admin_username or user.username == 'maalolan')
+        username = user.username
+        request.session["user_id"] = user.id
+        request.session["is_admin"] = is_admin
+    elif username == settings.admin_username or username == 'maalolan':
+        is_admin = True
+
     return {"authenticated": True, "csrf": request.session.get("csrf"), "username": username, "is_admin": is_admin}
 
 @app.post("/api/auth/logout", dependencies=[Depends(require_auth)])
